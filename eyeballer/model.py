@@ -17,7 +17,7 @@ from tensorflow.keras.applications.mobilenet import preprocess_input
 from sklearn.metrics import classification_report, accuracy_score, hamming_loss
 from eyeballer.augmentation import EyeballerAugmentation
 
-DATA_LABELS = ["custom404", "login", "homepage", "oldlooking"]
+DATA_LABELS = ["custom404", "login", "webapp", "oldlooking", "parked"]
 
 
 class EyeballModel:
@@ -54,30 +54,6 @@ class EyeballModel:
                            loss="binary_crossentropy",
                            metrics=["accuracy"])
 
-        # for layer in pretrained_layer.layers:
-        #     layer.trainable = False
-
-        if print_summary:
-            print(self.model.summary())
-
-        self.quiet = quiet
-
-        # Pull out our labels for use in generators later
-        data = pd.read_csv("labels.csv")
-        self.training_labels = data.loc[data['evaluation'] == False]  # noqa: E712
-        self.evaluation_labels = data.loc[data['evaluation'] == True]  # noqa: E712
-
-        # Shuffle the training labels
-        self.random_seed = False
-        self.seed = seed
-        if self.seed is None:
-            self.random_seed = True
-            self.seed = random.randint(0, 999999)
-            print("No seed set, ", end='')
-        print("using seed: {}".format(self.seed))
-        random.seed(self.seed)
-        self.training_labels = self.training_labels.sample(frac=1)
-
         if weights_file is not None and os.path.isfile(weights_file):
             try:
                 self.model.load_weights(weights_file)
@@ -89,6 +65,28 @@ class EyeballModel:
             if weights_file is not None:
                 raise FileNotFoundError
             print("WARN: No model loaded from file. Generating random model")
+
+        if print_summary:
+            print(self.model.summary())
+
+        self.quiet = quiet
+        self.seed = seed
+
+    def _init_labels(self):
+        # Pull out our labels for use in generators later
+        data = pd.read_csv("labels.csv")
+        self.training_labels = data.loc[data['evaluation'] == False]  # noqa: E712
+        self.evaluation_labels = data.loc[data['evaluation'] == True]  # noqa: E712
+
+        # Shuffle the training labels
+        self.random_seed = False
+        if self.seed is None:
+            self.random_seed = True
+            self.seed = random.randint(0, 999999)
+            print("No seed set, ", end='')
+        print("using seed: {}".format(self.seed))
+        random.seed(self.seed)
+        self.training_labels = self.training_labels.sample(frac=1)
 
         # Data augmentation
         augmentor = Augmentor.Pipeline()
@@ -114,6 +112,7 @@ class EyeballModel:
         """
         print("Training with seed: " + str(self.seed))
 
+        self._init_labels()
         data_generator = tf.keras.preprocessing.image.ImageDataGenerator(
             preprocessing_function=self.preprocess_training_function,
             validation_split=0.2,
@@ -129,7 +128,7 @@ class EyeballModel:
             subset='training',
             shuffle=True,
             seed=self.seed,
-            class_mode="other")
+            class_mode="raw")
         validation_generator = data_generator.flow_from_dataframe(
             self.training_labels,
             directory=self.image_dir,
@@ -140,17 +139,26 @@ class EyeballModel:
             subset='validation',
             shuffle=False,
             seed=self.seed,
-            class_mode="other")
+            class_mode="raw")
 
         # Model checkpoint - Saves model weights when validation accuracy improves
         callbacks = [tf.keras.callbacks.ModelCheckpoint(self.checkpoint_file,
-                     monitor='val_loss',
-                     verbose=1,
-                     save_best_only=True,
-                     save_weights_only=True,
-                     mode='min')]
+                                                        monitor='val_loss',
+                                                        verbose=1,
+                                                        save_best_only=True,
+                                                        save_weights_only=True,
+                                                        mode='min'),
+                     tf.keras.callbacks.TensorBoard(log_dir='logs',
+                                                    histogram_freq=2,
+                                                    write_graph=True,
+                                                    write_images=False,
+                                                    update_freq='epoch',
+                                                    profile_batch=2,
+                                                    embeddings_freq=0,
+                                                    embeddings_metadata=None),
+                     ]
 
-        history = self.model.fit_generator(
+        history = self.model.fit(
             training_generator,
             steps_per_epoch=len(training_generator.filenames) // batch_size,
             epochs=epochs,
@@ -197,8 +205,9 @@ class EyeballModel:
         result["filename"] = "custom-image"
         result["custom404"] = prediction[0][0]
         result["login"] = prediction[0][1]
-        result["homepage"] = prediction[0][2]
+        result["webapp"] = prediction[0][2]
         result["oldlooking"] = prediction[0][3]
+        result["parked"] = prediction[0][4]
         return result
 
     def predict(self, path, threshold=0.5):
@@ -241,8 +250,9 @@ class EyeballModel:
             result["filename"] = screenshot
             result["custom404"] = prediction[0][0]
             result["login"] = prediction[0][1]
-            result["homepage"] = prediction[0][2]
+            result["webapp"] = prediction[0][2]
             result["oldlooking"] = prediction[0][3]
+            result["parked"] = prediction[0][4]
             results.append(result)
         return results
 
@@ -253,6 +263,7 @@ class EyeballModel:
         threshold -- Value between 0->1. The cutoff where the numerical prediction becomes boolean. Default: 0.5
         """
         # Prepare the data
+        self._init_labels()
         data_generator = tf.keras.preprocessing.image.ImageDataGenerator(
             preprocessing_function=preprocess_input)
         evaluation_generator = data_generator.flow_from_dataframe(
@@ -263,7 +274,7 @@ class EyeballModel:
             target_size=(self.image_width, self.image_height),
             shuffle=False,
             batch_size=1,
-            class_mode="other")
+            class_mode="raw")
         # If a seed was selected, then also evaluate on the validation set for that seed
         if not self.random_seed:
             print("Using validation set...")
@@ -282,11 +293,11 @@ class EyeballModel:
                 subset='validation',
                 shuffle=False,
                 seed=self.seed,
-                class_mode="other")
+                class_mode="raw")
         else:
             print("Using evaluation set...")
 
-        predictions = self.model.predict_generator(
+        predictions = self.model.predict(
             evaluation_generator,
             verbose=1,
             steps=len(evaluation_generator))
